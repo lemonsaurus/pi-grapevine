@@ -6,8 +6,12 @@ export type Peer = {
   name: string;
   cwd: string;
   pid: number;
+  sessionId?: string;
+  sessionFile?: string;
   lastSeen: number;
 };
+
+export type PeerInput = Omit<Peer, 'lastSeen'>;
 
 export type GrapevineMessage = {
   id: string;
@@ -18,38 +22,40 @@ export type GrapevineMessage = {
   createdAt: number;
 };
 
-export type PingRequest = {
-  type: 'ping';
+export type ControlCommand =
+  | { id: string; type: 'prompt'; text: string; deliverAs?: 'steer' | 'followUp'; createdAt: number }
+  | { id: string; type: 'abort'; createdAt: number };
+
+export type SessionEvent = {
+  id: number;
+  sessionId: string;
+  type: string;
+  at: number;
+  data: unknown;
 };
 
-export type HelloRequest = {
-  type: 'hello';
-  peer: Omit<Peer, 'lastSeen'>;
-};
-
-export type ListRequest = {
-  type: 'list';
-  peer: Omit<Peer, 'lastSeen'>;
-};
-
-export type SendRequest = {
-  type: 'send';
-  peer: Omit<Peer, 'lastSeen'>;
-  to: string;
-  body: string;
-  replyTo?: string;
-};
-
-export type InboxRequest = {
-  type: 'inbox';
-  peer: Omit<Peer, 'lastSeen'>;
-};
-
-export type GrapevineRequest = PingRequest | HelloRequest | ListRequest | SendRequest | InboxRequest;
+export type GrapevineRequest =
+  | { type: 'ping' }
+  | { type: 'hello'; peer: PeerInput }
+  | { type: 'list'; peer: PeerInput }
+  | { type: 'send'; peer: PeerInput; to: string; body: string; replyTo?: string }
+  | { type: 'inbox'; peer: PeerInput }
+  | { type: 'session_register'; peer: PeerInput }
+  | { type: 'session_list'; peer: PeerInput }
+  | { type: 'session_prompt'; peer: PeerInput; target: string; text: string; deliverAs?: 'steer' | 'followUp' }
+  | { type: 'session_abort'; peer: PeerInput; target: string }
+  | { type: 'session_take_commands'; peer: PeerInput }
+  | { type: 'session_event'; peer: PeerInput; eventType: string; data: unknown }
+  | { type: 'session_events'; peer: PeerInput; target: string; after?: number };
 
 export type GrapevineResponse =
   | { ok: true; status: 'pong' }
   | { ok: true; peer: Peer; inbox?: GrapevineMessage[] }
   | { ok: true; peers: Peer[] }
+  | { ok: true; sessions: Peer[] }
+  | { ok: true; commands: ControlCommand[] }
+  | { ok: true; events: SessionEvent[] }
+  | { ok: true; status: 'queued'; command: ControlCommand }
   | { ok: true; status: 'delivered'; message: Omit<GrapevineMessage, 'body'> }
+  | { ok: true; status: 'recorded'; event: SessionEvent }
   | { ok: false; status: 'not_found' | 'ambiguous' | 'too_large'; error: string };
