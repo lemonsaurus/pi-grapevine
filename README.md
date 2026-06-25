@@ -15,7 +15,7 @@ The era of self-improving software, babyyyy.
 
 ## Security posture
 
-The safest network is no network. v1 uses OS-local IPC only.
+The safest network is no network. v1 uses a Unix domain socket on Linux and macOS.
 
 See [`docs/threat-model.md`](docs/threat-model.md).
 
@@ -36,3 +36,16 @@ See [`docs/protocol.md`](docs/protocol.md).
 - `~/.pi/grapevine/audit.jsonl`
 
 Runtime directories should be `0700`. Files with message metadata should be `0600`.
+
+
+## Non-goals
+
+- Remote control.
+- Mobile access.
+- Public relay support.
+- Cross-machine routing.
+- Generic session transcript export.
+- Autonomous swarm orchestration.
+- Windows native support.
+
+Blocking request/response can come later if the basic channel proves useful.
