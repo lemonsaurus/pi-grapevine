@@ -118,6 +118,10 @@ async function handleRequest(request: GrapevineRequest): Promise<GrapevineRespon
   if (request.type === 'session_prompt') return queueCommand(peer, request.target, { id: randomUUID(), type: 'prompt', text: request.text, deliverAs: request.deliverAs, createdAt: Date.now() });
   if (request.type === 'session_abort') return queueCommand(peer, request.target, { id: randomUUID(), type: 'abort', createdAt: Date.now() });
   if (request.type === 'session_compact') return queueCommand(peer, request.target, { id: randomUUID(), type: 'compact', createdAt: Date.now() });
+  if (request.type === 'session_tree') return queueCommand(peer, request.target, { id: randomUUID(), type: 'tree', createdAt: Date.now() });
+  if (request.type === 'session_navigate') return queueCommand(peer, request.target, { id: randomUUID(), type: 'navigate', targetEntryId: request.targetEntryId, createdAt: Date.now() });
+  if (request.type === 'session_fork') return queueCommand(peer, request.target, { id: randomUUID(), type: 'fork', targetEntryId: request.targetEntryId, createdAt: Date.now() });
+  if (request.type === 'session_clone') return queueCommand(peer, request.target, { id: randomUUID(), type: 'clone', targetEntryId: request.targetEntryId, createdAt: Date.now() });
   if (request.type === 'session_take_commands') return takeCommands(peer);
   if (request.type === 'session_command_update') return updateCommand(peer, request.commandId, request.state, request.error);
   if (request.type === 'session_event') return recordEvent(peer, request.eventType, request.data);

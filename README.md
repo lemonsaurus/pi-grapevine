@@ -31,6 +31,10 @@ See [`docs/threat-model.md`](docs/threat-model.md).
 - `grapevine_prompt`: prompt, steer, or queue follow-up work in another session.
 - `grapevine_abort`: abort another session.
 - `grapevine_compact`: compact another session.
+- `grapevine_tree`: request a tree snapshot from another session.
+- `grapevine_navigate`: navigate another session when Pi exposes that control in the live context.
+- `grapevine_fork`: fork another session when Pi exposes that control in the live context.
+- `grapevine_clone`: clone another session when Pi exposes that control in the live context.
 - `grapevine_events`: read lifecycle, streaming, tool, and answer events from another session.
 - `grapevine_send`: send a message to one peer by name or id.
 - `grapevine_reply`: reply to the newest unread inbound message.

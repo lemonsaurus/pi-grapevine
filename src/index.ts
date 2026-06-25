@@ -135,6 +135,54 @@ export default function grapevine(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: 'grapevine_tree',
+    label: 'Grapevine Tree',
+    description: 'Ask another local Pi session to report a tree snapshot.',
+    parameters: Type.Object({ target: Type.String() }),
+    async execute(_id, params: { target: string }, _signal, _onUpdate, ctx) {
+      const response = await requestBroker({ type: 'session_tree', peer: peerForContext(ctx), target: params.target });
+      if (response.ok && 'command' in response) return result(`Queued tree ${response.command.id}.`, response);
+      return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
+    name: 'grapevine_navigate',
+    label: 'Grapevine Navigate',
+    description: 'Ask another local Pi session to navigate to a tree entry when supported by Pi.',
+    parameters: Type.Object({ target: Type.String(), targetEntryId: Type.String() }),
+    async execute(_id, params: { target: string; targetEntryId: string }, _signal, _onUpdate, ctx) {
+      const response = await requestBroker({ type: 'session_navigate', peer: peerForContext(ctx), target: params.target, targetEntryId: params.targetEntryId });
+      if (response.ok && 'command' in response) return result(`Queued navigate ${response.command.id}.`, response);
+      return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
+    name: 'grapevine_fork',
+    label: 'Grapevine Fork',
+    description: 'Ask another local Pi session to fork from a tree entry when supported by Pi.',
+    parameters: Type.Object({ target: Type.String(), targetEntryId: Type.String() }),
+    async execute(_id, params: { target: string; targetEntryId: string }, _signal, _onUpdate, ctx) {
+      const response = await requestBroker({ type: 'session_fork', peer: peerForContext(ctx), target: params.target, targetEntryId: params.targetEntryId });
+      if (response.ok && 'command' in response) return result(`Queued fork ${response.command.id}.`, response);
+      return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
+    name: 'grapevine_clone',
+    label: 'Grapevine Clone',
+    description: 'Ask another local Pi session to clone at a tree entry when supported by Pi.',
+    parameters: Type.Object({ target: Type.String(), targetEntryId: Type.String() }),
+    async execute(_id, params: { target: string; targetEntryId: string }, _signal, _onUpdate, ctx) {
+      const response = await requestBroker({ type: 'session_clone', peer: peerForContext(ctx), target: params.target, targetEntryId: params.targetEntryId });
+      if (response.ok && 'command' in response) return result(`Queued clone ${response.command.id}.`, response);
+      return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
     name: 'grapevine_events',
     label: 'Grapevine Events',
     description: 'Read lifecycle, streaming, tool, and answer events from another local Pi session.',
@@ -223,10 +271,38 @@ async function applyCommand(pi: ExtensionAPI, ctx: ExtensionContext, command: Co
     await postSessionEvent(ctx, 'remote_compact', { id: command.id });
     return;
   }
+  if (command.type === 'tree') {
+    await updateCommand(ctx, command.id, 'done');
+    await postSessionEvent(ctx, 'remote_tree', { id: command.id, snapshot: treeSnapshot(ctx) });
+    return;
+  }
+  if (command.type === 'navigate') return runSessionMethod(ctx, command.id, 'navigateTree', [command.targetEntryId]);
+  if (command.type === 'fork') return runSessionMethod(ctx, command.id, 'fork', [command.targetEntryId]);
+  if (command.type === 'clone') return runSessionMethod(ctx, command.id, 'fork', [command.targetEntryId, { position: 'at' }]);
   activeCommands.set(peerId, command.id);
   await updateCommand(ctx, command.id, 'running');
   pi.sendUserMessage(command.text, command.deliverAs ? { deliverAs: command.deliverAs } : undefined);
   await postSessionEvent(ctx, 'remote_prompt', { id: command.id, deliverAs: command.deliverAs });
+}
+
+async function runSessionMethod(ctx: ExtensionContext, commandId: string, method: 'navigateTree' | 'fork', args: unknown[]) {
+  const target = ctx as ExtensionContext & { navigateTree?: (...args: unknown[]) => Promise<unknown>; fork?: (...args: unknown[]) => Promise<unknown> };
+  const fn = target[method];
+  if (!fn) {
+    await updateCommand(ctx, commandId, 'failed', `${method} is not available in this Pi context`);
+    await postSessionEvent(ctx, `remote_${method}_failed`, { id: commandId, message: `${method} unavailable` });
+    return;
+  }
+  await updateCommand(ctx, commandId, 'running');
+  try {
+    const output = await fn.apply(target, args);
+    await updateCommand(ctx, commandId, 'done');
+    await postSessionEvent(ctx, `remote_${method}_done`, { id: commandId, output, snapshot: treeSnapshot(ctx) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateCommand(ctx, commandId, 'failed', message);
+    await postSessionEvent(ctx, `remote_${method}_failed`, { id: commandId, message });
+  }
 }
 
 async function updateCommand(ctx: ExtensionContext, commandId: string, state: 'accepted' | 'running' | 'done' | 'failed' | 'aborted', error?: string) {
@@ -271,6 +347,16 @@ async function delegate(ctx: ExtensionContext, target: string, task: string, tim
     }
   }
   throw new Error(`Timed out waiting for ${target}`);
+}
+
+function treeSnapshot(ctx: ExtensionContext) {
+  const manager = ctx.sessionManager as typeof ctx.sessionManager & { getLeafId?: () => string | null };
+  return {
+    sessionId: ctx.sessionManager.getSessionId(),
+    leafId: manager.getLeafId?.() ?? null,
+    entries: ctx.sessionManager.getEntries(),
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 function peerForContext(ctx: ExtensionContext): PeerInput {

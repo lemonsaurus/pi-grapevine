@@ -27,7 +27,11 @@ export type GrapevineMessage = {
 export type ControlCommand =
   | { id: string; type: 'prompt'; text: string; deliverAs?: 'steer' | 'followUp'; createdAt: number }
   | { id: string; type: 'abort'; createdAt: number }
-  | { id: string; type: 'compact'; createdAt: number };
+  | { id: string; type: 'compact'; createdAt: number }
+  | { id: string; type: 'tree'; createdAt: number }
+  | { id: string; type: 'navigate'; targetEntryId: string; createdAt: number }
+  | { id: string; type: 'fork'; targetEntryId: string; createdAt: number }
+  | { id: string; type: 'clone'; targetEntryId: string; createdAt: number };
 
 export type CommandRecord = {
   id: string;
@@ -89,6 +93,10 @@ export type GrapevineRequest =
   | { type: 'session_prompt'; peer: PeerInput; target: string; text: string; deliverAs?: 'steer' | 'followUp' }
   | { type: 'session_abort'; peer: PeerInput; target: string }
   | { type: 'session_compact'; peer: PeerInput; target: string }
+  | { type: 'session_tree'; peer: PeerInput; target: string }
+  | { type: 'session_navigate'; peer: PeerInput; target: string; targetEntryId: string }
+  | { type: 'session_fork'; peer: PeerInput; target: string; targetEntryId: string }
+  | { type: 'session_clone'; peer: PeerInput; target: string; targetEntryId: string }
   | { type: 'session_take_commands'; peer: PeerInput }
   | { type: 'session_command_update'; peer: PeerInput; commandId: string; state: CommandState; error?: string }
   | { type: 'session_event'; peer: PeerInput; eventType: string; data: unknown }
