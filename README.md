@@ -28,3 +28,11 @@ See [`docs/threat-model.md`](docs/threat-model.md).
 - `grapevine_reply`: reply to the most recent inbound message.
 
 See [`docs/protocol.md`](docs/protocol.md).
+
+
+## Runtime files
+
+- `~/.pi/grapevine/broker.sock`
+- `~/.pi/grapevine/audit.jsonl`
+
+Runtime directories should be `0700`. Files with message metadata should be `0600`.
