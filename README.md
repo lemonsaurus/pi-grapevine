@@ -22,16 +22,20 @@ See [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Tool surface
 
-- `grapevine_status`: start the broker, register this session, show unread messages.
+- `grapevine_status`: show daemon, current peer, and session state.
+- `grapevine_daemon`: show daemon paths and counters.
 - `grapevine_list`: list peers seen in the last 10 minutes.
 - `grapevine_sessions`: list steerable Pi sessions.
+- `grapevine_spawn`: spawn a named Pi worker in tmux.
+- `grapevine_delegate`: send a task, watch events, and return a digest.
 - `grapevine_prompt`: prompt, steer, or queue follow-up work in another session.
 - `grapevine_abort`: abort another session.
-- `grapevine_events`: read lifecycle, tool, and answer events from another session.
+- `grapevine_compact`: compact another session.
+- `grapevine_events`: read lifecycle, streaming, tool, and answer events from another session.
 - `grapevine_send`: send a message to one peer by name or id.
 - `grapevine_reply`: reply to the newest unread inbound message.
 
-Set `PI_GRAPEVINE_NAME` before starting Pi to give a session a stable human name. Send `/skill:name` through `grapevine_prompt` to run a skill in the target session.
+Set `PI_GRAPEVINE_NAME` before starting Pi to give a session a stable human name. Send `/skill:name` through `grapevine_prompt` or `grapevine_delegate` to run a skill in the target session. Set `PI_GRAPEVINE_DISABLE=1` to opt a session out.
 
 See [`docs/protocol.md`](docs/protocol.md).
 
@@ -40,8 +44,9 @@ See [`docs/protocol.md`](docs/protocol.md).
 
 - `~/.pi/grapevine/broker.sock`
 - `~/.pi/grapevine/audit.jsonl`
+- `~/.pi/grapevine/state.json`
 
-The broker runs as a detached local daemon started on demand by the extension.
+The broker runs as a detached local daemon started on demand by the extension. State is local and metadata-only except live event payloads used for supervision.
 
 Runtime directories should be `0700`. Files with message metadata should be `0600`.
 

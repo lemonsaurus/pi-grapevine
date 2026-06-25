@@ -58,10 +58,24 @@ test('sessions can queue control commands and read events', async () => {
     assert.equal(commands.ok, true);
     assert.equal('commands' in commands && commands.commands[0]?.type, 'prompt');
 
+    const updated = await requestBroker({ type: 'session_command_update', peer: worker, commandId: 'command' in queued ? queued.command.id : '', state: 'running' }, paths);
+    assert.equal(updated.ok, true);
+    assert.equal('record' in updated && updated.record.state, 'running');
+
+    await requestBroker({ type: 'session_event', peer: worker, eventType: 'agent_start', data: { type: 'agent_start' } }, paths);
     await requestBroker({ type: 'session_event', peer: worker, eventType: 'message_end', data: { role: 'assistant', content: 'done' } }, paths);
     const events = await requestBroker({ type: 'session_events', peer: manager, target: 'pi-session-1' }, paths);
     assert.equal(events.ok, true);
-    assert.equal('events' in events && events.events[0]?.type, 'message_end');
+    assert.equal('events' in events && events.events.at(-1)?.type, 'message_end');
+
+    const status = await requestBroker({ type: 'session_status', peer: manager, target: 'pi-session-1' }, paths);
+    assert.equal(status.ok, true);
+    assert.equal('statuses' in status && status.statuses[0]?.busy, true);
+    assert.equal('statuses' in status && status.statuses[0]?.lastAnswer, 'done');
+
+    const daemon = await requestBroker({ type: 'daemon_status', peer: manager }, paths);
+    assert.equal(daemon.ok, true);
+    assert.equal('daemon' in daemon && daemon.daemon.sessionCount, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -72,5 +86,6 @@ function testPaths(dir: string): GrapevinePaths {
     dir,
     socket: join(dir, 'broker.sock'),
     auditLog: join(dir, 'audit.jsonl'),
+    state: join(dir, 'state.json'),
   };
 }

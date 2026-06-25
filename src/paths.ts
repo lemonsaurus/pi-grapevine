@@ -5,6 +5,7 @@ export type GrapevinePaths = {
   dir: string;
   socket: string;
   auditLog: string;
+  state: string;
 };
 
 export function grapevinePaths(home = homedir()): GrapevinePaths {
@@ -13,5 +14,6 @@ export function grapevinePaths(home = homedir()): GrapevinePaths {
     dir,
     socket: join(dir, 'broker.sock'),
     auditLog: join(dir, 'audit.jsonl'),
+    state: join(dir, 'state.json'),
   };
 }

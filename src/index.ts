@@ -1,28 +1,50 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { currentPeer, requestBroker } from './broker.js';
-import type { ControlCommand, GrapevineMessage, Peer, PeerInput, SessionEvent } from './protocol.js';
+import type { ControlCommand, GrapevineMessage, Peer, PeerInput, SessionEvent, TaskDigest } from './protocol.js';
 
 const pollTimers = new Map<string, NodeJS.Timeout>();
-const lastEventIds = new Map<string, number>();
+const activeCommands = new Map<string, string>();
 
 export default function grapevine(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => activateSession(pi, ctx));
   pi.on('session_shutdown', (_event, ctx) => deactivateSession(ctx));
   pi.on('agent_start', (event, ctx) => postSessionEvent(ctx, 'agent_start', event));
-  pi.on('agent_end', (event, ctx) => postSessionEvent(ctx, 'agent_end', event));
+  pi.on('agent_end', async (event, ctx) => {
+    await postSessionEvent(ctx, 'agent_end', event);
+    const commandId = activeCommands.get(peerForContext(ctx).id);
+    if (commandId) await updateCommand(ctx, commandId, 'done');
+    activeCommands.delete(peerForContext(ctx).id);
+  });
+  pi.on('message_update', (event, ctx) => postSessionEvent(ctx, 'message_update', event.assistantMessageEvent));
   pi.on('message_end', (event, ctx) => postSessionEvent(ctx, 'message_end', event.message));
   pi.on('tool_execution_start', (event, ctx) => postSessionEvent(ctx, 'tool_execution_start', event));
+  pi.on('tool_execution_update', (event, ctx) => postSessionEvent(ctx, 'tool_execution_update', event));
   pi.on('tool_execution_end', (event, ctx) => postSessionEvent(ctx, 'tool_execution_end', event));
 
   pi.registerTool({
     name: 'grapevine_status',
     label: 'Grapevine Status',
-    description: 'Show local pi-grapevine status and unread messages.',
+    description: 'Show broker, current peer, and steerable session state.',
+    parameters: Type.Object({ target: Type.Optional(Type.String()) }),
+    async execute(_id, params: { target?: string }, _signal, _onUpdate, ctx) {
+      const peer = peerForContext(ctx);
+      const hello = await requestBroker({ type: 'hello', peer });
+      const status = await requestBroker({ type: 'session_status', peer, target: params.target });
+      return result([hello.ok && 'peer' in hello ? formatStatus(hello.peer, hello.inbox ?? []) : errorText(hello), status.ok && 'statuses' in status ? formatSessionStatuses(status.statuses) : errorText(status)].join('\n\n'), { hello, status });
+    },
+  });
+
+  pi.registerTool({
+    name: 'grapevine_daemon',
+    label: 'Grapevine Daemon',
+    description: 'Show local pi-grapevine daemon status.',
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const response = await requestBroker({ type: 'hello', peer: peerForContext(ctx) });
-      if (response.ok && 'peer' in response) return result(formatStatus(response.peer, response.inbox ?? []), response);
+      const response = await requestBroker({ type: 'daemon_status', peer: peerForContext(ctx) });
+      if (response.ok && 'daemon' in response) return result(JSON.stringify(response.daemon, null, 2), response);
       return result(errorText(response), response);
     },
   });
@@ -52,18 +74,39 @@ export default function grapevine(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: 'grapevine_spawn',
+    label: 'Grapevine Spawn',
+    description: 'Spawn a named Pi worker in tmux with pi-grapevine loaded.',
+    parameters: Type.Object({ name: Type.String(), cwd: Type.Optional(Type.String()) }),
+    async execute(_id, params: { name: string; cwd?: string }, _signal, _onUpdate, ctx) {
+      const extensionPath = fileURLToPath(import.meta.url);
+      const workerCwd = params.cwd ?? ctx.cwd;
+      const command = `PI_GRAPEVINE_NAME=${shellQuote(params.name)} PI_SKIP_VERSION_CHECK=1 pi -e ${shellQuote(extensionPath)} --no-session`;
+      const execResult = await pi.exec('tmux', ['new-window', '-d', '-c', workerCwd, '-n', `gv-${params.name}`, command]);
+      return result(execResult.code === 0 ? `Spawned ${params.name} in ${workerCwd}.` : execResult.stderr || execResult.stdout, { execResult });
+    },
+  });
+
+  pi.registerTool({
     name: 'grapevine_prompt',
     label: 'Grapevine Prompt',
     description: 'Prompt or steer another local Pi session. Use deliverAs=steer for mid-work redirection and followUp to queue after completion.',
-    parameters: Type.Object({
-      target: Type.String(),
-      text: Type.String(),
-      deliverAs: Type.Optional(Type.Union([Type.Literal('steer'), Type.Literal('followUp')])),
-    }),
+    parameters: Type.Object({ target: Type.String(), text: Type.String(), deliverAs: Type.Optional(Type.Union([Type.Literal('steer'), Type.Literal('followUp')])) }),
     async execute(_id, params: { target: string; text: string; deliverAs?: 'steer' | 'followUp' }, _signal, _onUpdate, ctx) {
       const response = await requestBroker({ type: 'session_prompt', peer: peerForContext(ctx), target: params.target, text: params.text, deliverAs: params.deliverAs });
       if (response.ok && 'command' in response) return result(`Queued ${response.command.type} ${response.command.id}.`, response);
       return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
+    name: 'grapevine_delegate',
+    label: 'Grapevine Delegate',
+    description: 'Send a task to a worker and wait for a digest with final answer, tools, and events.',
+    parameters: Type.Object({ target: Type.String(), task: Type.String(), timeoutMs: Type.Optional(Type.Number()) }),
+    async execute(_id, params: { target: string; task: string; timeoutMs?: number }, _signal, onUpdate, ctx) {
+      const digest = await delegate(ctx, params.target, params.task, params.timeoutMs ?? 120_000, (line) => onUpdate?.({ content: [{ type: 'text', text: line }], details: {} }));
+      return { content: [{ type: 'text', text: formatDigest(digest) }], details: digest };
     },
   });
 
@@ -80,9 +123,21 @@ export default function grapevine(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: 'grapevine_compact',
+    label: 'Grapevine Compact',
+    description: 'Ask another local Pi session to compact its context.',
+    parameters: Type.Object({ target: Type.String() }),
+    async execute(_id, params: { target: string }, _signal, _onUpdate, ctx) {
+      const response = await requestBroker({ type: 'session_compact', peer: peerForContext(ctx), target: params.target });
+      if (response.ok && 'command' in response) return result(`Queued compact ${response.command.id}.`, response);
+      return result(errorText(response), response);
+    },
+  });
+
+  pi.registerTool({
     name: 'grapevine_events',
     label: 'Grapevine Events',
-    description: 'Read lifecycle, tool, and answer events from another local Pi session.',
+    description: 'Read lifecycle, streaming, tool, and answer events from another local Pi session.',
     parameters: Type.Object({ target: Type.String(), after: Type.Optional(Type.Number()) }),
     async execute(_id, params: { target: string; after?: number }, _signal, _onUpdate, ctx) {
       const response = await requestBroker({ type: 'session_events', peer: peerForContext(ctx), target: params.target, after: params.after });
@@ -121,6 +176,7 @@ export default function grapevine(pi: ExtensionAPI) {
 }
 
 function activateSession(pi: ExtensionAPI, ctx: ExtensionContext) {
+  if (process.env.PI_GRAPEVINE_DISABLE === '1') return;
   const peer = peerForContext(ctx);
   if (pollTimers.has(peer.id)) return;
   void requestBroker({ type: 'session_register', peer });
@@ -145,19 +201,76 @@ async function pollCommands(pi: ExtensionAPI, ctx: ExtensionContext) {
 }
 
 async function applyCommand(pi: ExtensionAPI, ctx: ExtensionContext, command: ControlCommand) {
+  const peerId = peerForContext(ctx).id;
   if (command.type === 'abort') {
     ctx.abort();
+    await updateCommand(ctx, command.id, 'aborted');
     await postSessionEvent(ctx, 'remote_abort', { id: command.id });
     return;
   }
+  if (command.type === 'compact') {
+    await updateCommand(ctx, command.id, 'running');
+    ctx.compact({
+      onComplete: (compactResult) => {
+        void updateCommand(ctx, command.id, 'done');
+        void postSessionEvent(ctx, 'remote_compact_done', compactResult);
+      },
+      onError: (error) => {
+        void updateCommand(ctx, command.id, 'failed', error.message);
+        void postSessionEvent(ctx, 'remote_compact_failed', { message: error.message });
+      },
+    });
+    await postSessionEvent(ctx, 'remote_compact', { id: command.id });
+    return;
+  }
+  activeCommands.set(peerId, command.id);
+  await updateCommand(ctx, command.id, 'running');
   pi.sendUserMessage(command.text, command.deliverAs ? { deliverAs: command.deliverAs } : undefined);
   await postSessionEvent(ctx, 'remote_prompt', { id: command.id, deliverAs: command.deliverAs });
+}
+
+async function updateCommand(ctx: ExtensionContext, commandId: string, state: 'accepted' | 'running' | 'done' | 'failed' | 'aborted', error?: string) {
+  await requestBroker({ type: 'session_command_update', peer: peerForContext(ctx), commandId, state, error }).catch(() => undefined);
 }
 
 async function postSessionEvent(ctx: ExtensionContext, eventType: string, data: unknown) {
   const peer = peerForContext(ctx);
   if (!peer.sessionId) return;
   await requestBroker({ type: 'session_event', peer, eventType, data }).catch(() => undefined);
+}
+
+async function delegate(ctx: ExtensionContext, target: string, task: string, timeoutMs: number, update: (line: string) => void): Promise<TaskDigest> {
+  const peer = peerForContext(ctx);
+  const before = await requestBroker({ type: 'session_events', peer, target });
+  const after = before.ok && 'events' in before ? before.events.at(-1)?.id ?? 0 : 0;
+  const queued = await requestBroker({ type: 'session_prompt', peer, target, text: task });
+  if (!(queued.ok && 'command' in queued)) throw new Error(errorText(queued));
+  const commandId = queued.command.id;
+  const deadline = Date.now() + timeoutMs;
+  let latest = after;
+  let finalAnswer = '';
+  const events: SessionEvent[] = [];
+  const tools = new Set<string>();
+
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const response = await requestBroker({ type: 'session_events', peer, target, after: latest });
+    if (!(response.ok && 'events' in response)) continue;
+    for (const event of response.events) {
+      events.push(event);
+      latest = Math.max(latest, event.id);
+      const tool = toolName(event.data);
+      if (tool) tools.add(tool);
+      const answer = assistantText(event.data);
+      if (answer) finalAnswer = answer;
+      if (event.type === 'tool_execution_start') update(`${event.id} tool ${tool ?? 'unknown'}`);
+      if (event.type === 'message_end' && answer) update(`${event.id} answer ${answer.slice(0, 200)}`);
+      if (event.type === 'agent_end' && events.some((candidate) => candidate.type === 'remote_prompt' && JSON.stringify(candidate.data).includes(commandId))) {
+        return { target, commandId, finalAnswer, tools: [...tools], events };
+      }
+    }
+  }
+  throw new Error(`Timed out waiting for ${target}`);
 }
 
 function peerForContext(ctx: ExtensionContext): PeerInput {
@@ -191,10 +304,25 @@ function formatSessions(sessions: Peer[]) {
   return sessions.map((peer) => `${peer.name} (${peer.id}) session=${peer.sessionId} cwd=${peer.cwd}`).join('\n');
 }
 
+function formatSessionStatuses(statuses: Array<{ peer: Peer; busy: boolean; currentTool?: string; lastAnswer?: string; pendingCommands: number; lastEventId: number }>) {
+  if (statuses.length === 0) return 'No steerable sessions.';
+  return statuses.map((status) => [
+    `${status.peer.name} (${status.peer.id}) ${status.busy ? 'busy' : 'idle'}`,
+    `  session=${status.peer.sessionId}`,
+    `  cwd=${status.peer.cwd}`,
+    `  pending=${status.pendingCommands} lastEvent=${status.lastEventId}`,
+    status.currentTool ? `  tool=${status.currentTool}` : undefined,
+    status.lastAnswer ? `  last=${status.lastAnswer.slice(0, 240)}` : undefined,
+  ].filter(Boolean).join('\n')).join('\n');
+}
+
 function formatEvents(events: SessionEvent[]) {
   if (events.length === 0) return 'No events.';
-  for (const event of events) lastEventIds.set(event.sessionId, event.id);
   return events.map((event) => `${event.id} ${event.type}: ${summary(event.data)}`).join('\n');
+}
+
+function formatDigest(digest: TaskDigest) {
+  return [`Command: ${digest.commandId}`, `Target: ${digest.target}`, `Tools: ${digest.tools.join(', ') || 'none'}`, '', digest.finalAnswer || '(no final answer)'].join('\n');
 }
 
 function summary(data: unknown): string {
@@ -202,9 +330,24 @@ function summary(data: unknown): string {
   return JSON.stringify(data).slice(0, 300);
 }
 
+function assistantText(data: unknown): string | undefined {
+  const record = typeof data === 'object' && data ? data as { role?: unknown; content?: unknown } : {};
+  if (record.role !== 'assistant') return undefined;
+  const text = textContent(record).trim();
+  return text || undefined;
+}
+
 function textContent(data: unknown): string {
   const content = (data as { content?: unknown }).content;
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content.map((part) => (typeof part === 'object' && part && 'text' in part ? String((part as { text?: unknown }).text) : '')).join('');
+}
+
+function toolName(data: unknown): string | undefined {
+  return typeof data === 'object' && data && 'toolName' in data ? String((data as { toolName?: unknown }).toolName) : undefined;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
