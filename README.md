@@ -18,3 +18,13 @@ The era of self-improving software, babyyyy.
 The safest network is no network. v1 uses OS-local IPC only.
 
 See [`docs/threat-model.md`](docs/threat-model.md).
+
+
+## Initial tool surface
+
+- `grapevine_status`: show broker and current peer state.
+- `grapevine_list`: list connected peers.
+- `grapevine_send`: send a message to one peer.
+- `grapevine_reply`: reply to the most recent inbound message.
+
+See [`docs/protocol.md`](docs/protocol.md).
