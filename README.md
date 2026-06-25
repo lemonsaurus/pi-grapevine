@@ -20,12 +20,14 @@ The safest network is no network. v1 uses a Unix domain socket on Linux and macO
 See [`docs/threat-model.md`](docs/threat-model.md).
 
 
-## Initial tool surface
+## Tool surface
 
-- `grapevine_status`: show broker and current peer state.
-- `grapevine_list`: list connected peers.
-- `grapevine_send`: send a message to one peer.
-- `grapevine_reply`: reply to the most recent inbound message.
+- `grapevine_status`: start the broker, register this session, show unread messages.
+- `grapevine_list`: list peers seen in the last 10 minutes.
+- `grapevine_send`: send a message to one peer by name or id.
+- `grapevine_reply`: reply to the newest unread inbound message.
+
+Set `PI_GRAPEVINE_NAME` before starting Pi to give a session a stable human name.
 
 See [`docs/protocol.md`](docs/protocol.md).
 
