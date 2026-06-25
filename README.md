@@ -2,7 +2,7 @@
 
 Paranoid local messaging for Pi agents.
 
-For now this is a hello-world Pi extension and a sketch for a local-only agent grapevine.
+For now this is a local-only Pi session control plane over a Unix socket.
 
 
 ## Distribution
@@ -41,12 +41,14 @@ See [`docs/protocol.md`](docs/protocol.md).
 - `~/.pi/grapevine/broker.sock`
 - `~/.pi/grapevine/audit.jsonl`
 
+The broker runs as a detached local daemon started on demand by the extension.
+
 Runtime directories should be `0700`. Files with message metadata should be `0600`.
 
 
 ## Non-goals
 
-- Remote control.
+- Network remote control.
 - Mobile access.
 - Public relay support.
 - Cross-machine routing.

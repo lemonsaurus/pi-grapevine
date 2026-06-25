@@ -1,7 +1,10 @@
+import { existsSync } from 'node:fs';
 import { appendFile, chmod, mkdir, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { basename } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { cwd, pid } from 'node:process';
 import { grapevinePaths, type GrapevinePaths } from './paths.js';
 import {
@@ -52,12 +55,18 @@ export async function requestBroker(request: GrapevineRequest, paths = grapevine
 export async function ensureBroker(paths = grapevinePaths()): Promise<void> {
   try {
     await ping(paths.socket);
+    return;
   } catch {
-    await startBroker(paths);
+    if (paths.socket !== grapevinePaths().socket || process.env.PI_GRAPEVINE_IN_PROCESS === '1') {
+      await startBroker(paths);
+      return;
+    }
+    startDaemon(paths);
+    await waitForBroker(paths.socket);
   }
 }
 
-async function startBroker(paths: GrapevinePaths): Promise<void> {
+export async function startBroker(paths: GrapevinePaths, options: { unref?: boolean } = { unref: true }): Promise<void> {
   if (server?.listening && state.paths.socket === paths.socket) return;
   if (server?.listening) {
     await new Promise<void>((resolve, reject) => server!.close((error) => (error ? reject(error) : resolve())));
@@ -88,7 +97,7 @@ async function startBroker(paths: GrapevinePaths): Promise<void> {
     });
   });
   await chmod(paths.socket, 0o600);
-  server.unref();
+  if (options.unref !== false) server.unref();
   armIdleExit();
 }
 
@@ -228,6 +237,26 @@ function armIdleExit() {
     server = undefined;
   }, 30 * 60 * 1000);
   state.idleTimer.unref();
+}
+
+function startDaemon(paths: GrapevinePaths) {
+  const baseDir = dirname(fileURLToPath(import.meta.url));
+  const sourceDaemon = resolve(baseDir, 'daemon.ts');
+  const daemonPath = existsSync(sourceDaemon) ? sourceDaemon : resolve(baseDir, 'daemon.js');
+  const child = spawn(process.execPath, ['--import', 'jiti/register', daemonPath, paths.dir], { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+async function waitForBroker(socketPath: string) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await ping(socketPath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw new Error('pi-grapevine daemon did not start');
 }
 
 function ping(socketPath: string): Promise<void> {
