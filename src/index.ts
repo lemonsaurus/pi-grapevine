@@ -227,11 +227,11 @@ function activateSession(pi: ExtensionAPI, ctx: ExtensionContext) {
   if (process.env.PI_GRAPEVINE_DISABLE === '1') return;
   const peer = peerForContext(ctx);
   if (pollTimers.has(peer.id)) return;
-  void requestBroker({ type: 'session_register', peer });
-  const timer = setInterval(() => void pollCommands(pi, ctx), 500);
+  void safeGrapevine(ctx, () => requestBroker({ type: 'session_register', peer }));
+  const timer = setInterval(() => void safeGrapevine(ctx, () => pollCommands(pi, ctx)), 500);
   timer.unref?.();
   pollTimers.set(peer.id, timer);
-  ctx.ui.setStatus('grapevine', ctx.ui.theme.fg('success', 'Grapevine'));
+  setGrapevineStatus(ctx, 'ok');
 }
 
 function deactivateSession(ctx: ExtensionContext) {
@@ -245,7 +245,23 @@ async function pollCommands(pi: ExtensionAPI, ctx: ExtensionContext) {
   const peer = peerForContext(ctx);
   const response = await requestBroker({ type: 'session_take_commands', peer });
   if (!(response.ok && 'commands' in response)) return;
+  setGrapevineStatus(ctx, 'ok');
   for (const command of response.commands) await applyCommand(pi, ctx, command);
+}
+
+async function safeGrapevine(ctx: ExtensionContext, fn: () => Promise<unknown>) {
+  try {
+    return await fn();
+  } catch (error) {
+    setGrapevineStatus(ctx, 'error');
+    return undefined;
+  }
+}
+
+function setGrapevineStatus(ctx: ExtensionContext, state: 'ok' | 'error') {
+  const label = state === 'ok' ? 'Grapevine' : 'Grapevine error';
+  const color = state === 'ok' ? 'success' : 'warning';
+  ctx.ui.setStatus('grapevine', ctx.ui.theme.fg(color, label));
 }
 
 async function applyCommand(pi: ExtensionAPI, ctx: ExtensionContext, command: ControlCommand) {
