@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { appendFile, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
@@ -10,6 +10,7 @@ import { grapevinePaths, type GrapevinePaths } from './paths.js';
 import { maxBodyBytes, peerTtlMs, type CommandRecord, type ControlCommand, type GrapevineMessage, type GrapevineRequest, type GrapevineResponse, type Peer, type PeerInput, type SessionEvent, type SessionStatus } from './protocol.js';
 
 let server: Server | undefined;
+let persistChain = Promise.resolve();
 
 type State = {
   peers: Map<string, Peer>;
@@ -150,10 +151,10 @@ async function hello(peer: Peer): Promise<GrapevineResponse> {
   return { ok: true, peer, inbox: state.inboxes.get(peer.id) ?? [] };
 }
 
-function takeInbox(peer: Peer): GrapevineResponse {
+async function takeInbox(peer: Peer): Promise<GrapevineResponse> {
   const inbox = state.inboxes.get(peer.id) ?? [];
   state.inboxes.set(peer.id, []);
-  void persist();
+  await persist();
   return { ok: true, peer, inbox };
 }
 
@@ -204,11 +205,11 @@ async function queueCommand(from: Peer, target: string, command: ControlCommand)
   return { ok: true, status: 'queued', command, record };
 }
 
-function takeCommands(peer: Peer): GrapevineResponse {
+async function takeCommands(peer: Peer): Promise<GrapevineResponse> {
   const commands = state.commands.get(peer.id) ?? [];
   state.commands.set(peer.id, []);
   for (const command of commands) setCommand(command.id, 'accepted');
-  void persist();
+  await persist();
   return { ok: true, commands };
 }
 
@@ -267,7 +268,6 @@ async function failure(status: 'not_found' | 'ambiguous', error: string, data: R
 function touchPeer(peer: PeerInput): Peer {
   const seen = { ...peer, lastSeen: Date.now() };
   state.peers.set(peer.id, seen);
-  void persist();
   return seen;
 }
 
@@ -298,6 +298,7 @@ async function audit(event: string, data: Record<string, unknown>) {
 }
 
 async function loadState() {
+  resetState();
   try {
     const saved = JSON.parse(await readFile(state.paths.state, 'utf8')) as {
       peers?: Peer[];
@@ -316,16 +317,35 @@ async function loadState() {
   } catch {}
 }
 
+function resetState() {
+  state.peers = new Map();
+  state.inboxes = new Map();
+  state.commands = new Map();
+  state.commandRecords = new Map();
+  state.events = [];
+  state.nextEventId = 1;
+}
+
 async function persist() {
-  await writeFile(state.paths.state, JSON.stringify({
+  const paths = state.paths;
+  const body = JSON.stringify({
     peers: [...state.peers.values()],
     inboxes: [...state.inboxes.entries()],
     commands: [...state.commands.entries()],
     commandRecords: [...state.commandRecords.values()].slice(-500),
     events: state.events.slice(-2000),
     nextEventId: state.nextEventId,
-  }), { mode: 0o600 }).catch(() => undefined);
-  await chmod(state.paths.state, 0o600).catch(() => undefined);
+  });
+  persistChain = persistChain
+    .catch(() => undefined)
+    .then(async () => {
+      const tmp = `${paths.state}.${pid}.${randomUUID()}.tmp`;
+      await writeFile(tmp, body, { mode: 0o600 });
+      await rename(tmp, paths.state);
+      await chmod(paths.state, 0o600).catch(() => undefined);
+    })
+    .catch(() => undefined);
+  await persistChain;
 }
 
 function lastLifecycle(events: SessionEvent[]): string | undefined {
@@ -359,7 +379,7 @@ function startDaemon(paths: GrapevinePaths) {
   const baseDir = dirname(fileURLToPath(import.meta.url));
   const sourceDaemon = resolve(baseDir, 'daemon.ts');
   const daemonPath = existsSync(sourceDaemon) ? sourceDaemon : resolve(baseDir, 'daemon.js');
-  const child = spawn(process.execPath, ['--import', 'jiti/register', daemonPath, paths.dir], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['--import', 'jiti/register', daemonPath, paths.dir], { cwd: baseDir, detached: true, stdio: 'ignore' });
   child.unref();
 }
 
@@ -392,15 +412,22 @@ function sendRequest(request: GrapevineRequest, socketPath: string): Promise<Gra
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let buffer = '';
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      fn();
+    };
     socket.setEncoding('utf8');
     socket.once('connect', () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on('data', (chunk) => {
       buffer += chunk;
       const lineEnd = buffer.indexOf('\n');
       if (lineEnd === -1) return;
-      resolve(JSON.parse(buffer.slice(0, lineEnd)) as GrapevineResponse);
-      socket.end();
+      finish(() => resolve(JSON.parse(buffer.slice(0, lineEnd)) as GrapevineResponse));
     });
-    socket.once('error', reject);
+    socket.once('error', (error) => finish(() => reject(error)));
+    socket.setTimeout(5000, () => finish(() => reject(new Error('broker request timed out'))));
   });
 }

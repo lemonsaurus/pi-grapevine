@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -32,6 +32,31 @@ test('peers can list, send, and read messages', async () => {
     const empty = await requestBroker({ type: 'inbox', peer: bob }, paths);
     assert.equal(empty.ok, true);
     assert.equal('inbox' in empty && empty.inbox?.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent session events leave valid state on disk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-grapevine-'));
+  const paths = testPaths(dir);
+  const worker = { id: 'worker-concurrent', name: 'worker', cwd: '/tmp/worker', pid: 505, sessionId: 'pi-session-concurrent' };
+
+  try {
+    await requestBroker({ type: 'session_register', peer: worker }, paths);
+    await Promise.all(
+      Array.from({ length: 100 }, (_, index) =>
+        requestBroker({
+          type: 'session_event',
+          peer: worker,
+          eventType: 'message_update',
+          data: { role: 'assistant', content: `chunk ${index}` },
+        }, paths),
+      ),
+    );
+
+    const saved = JSON.parse(await readFile(paths.state, 'utf8')) as { events?: unknown[] };
+    assert.equal(saved.events?.length, 100);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
