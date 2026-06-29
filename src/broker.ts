@@ -7,7 +7,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cwd, pid } from 'node:process';
 import { grapevinePaths, type GrapevinePaths } from './paths.js';
-import { maxBodyBytes, peerTtlMs, type CommandRecord, type ControlCommand, type GrapevineMessage, type GrapevineRequest, type GrapevineResponse, type Peer, type PeerInput, type SessionEvent, type SessionStatus } from './protocol.js';
+import { maxBodyBytes, peerTtlMs, type CommandRecord, type ControlCommand, type GrapevineMessage, type GrapevineRequest, type GrapevineResponse, type Peer, type PeerInput, type PeerRole, type SessionEvent, type SessionStatus } from './protocol.js';
 
 let server: Server | undefined;
 let persistChain = Promise.resolve();
@@ -55,7 +55,14 @@ export function currentPeer(input: Partial<PeerInput> = {}): PeerInput {
   const name = input.name || process.env.PI_GRAPEVINE_NAME || basename(cwd()) || 'pi';
   const sessionPart = input.sessionId ? `:${input.sessionId}` : '';
   const id = input.id || createHash('sha256').update(`${name}:${cwd()}:${pid}${sessionPart}`).digest('hex').slice(0, 12);
-  return { id, name, cwd: input.cwd ?? cwd(), pid: input.pid ?? pid, sessionId: input.sessionId, sessionFile: input.sessionFile };
+  const role = input.role ?? peerRole();
+  const managerId = input.managerId ?? process.env.PI_GRAPEVINE_MANAGER_ID;
+  return { id, name, cwd: input.cwd ?? cwd(), pid: input.pid ?? pid, role, managerId, sessionId: input.sessionId, sessionFile: input.sessionFile };
+}
+
+function peerRole(): PeerRole {
+  if (process.env.PI_GRAPEVINE_ROLE === 'worker' || process.env.AGENCY_ROLE === 'worker') return 'worker';
+  return 'manager';
 }
 
 export async function requestBroker(request: GrapevineRequest, paths = grapevinePaths()): Promise<GrapevineResponse> {
@@ -138,7 +145,10 @@ async function handleRequest(request: GrapevineRequest): Promise<GrapevineRespon
   if (request.type === 'session_list') return { ok: true, sessions: sessions() };
   if (request.type === 'session_status') return sessionStatus(request.target);
   if (request.type === 'session_prompt') return queueCommand(peer, request.target, { id: randomUUID(), type: 'prompt', text: request.text, deliverAs: request.deliverAs, createdAt: Date.now() });
-  if (request.type === 'session_abort') return queueCommand(peer, request.target, { id: randomUUID(), type: 'abort', createdAt: Date.now() });
+  if (request.type === 'session_abort') {
+    if (peer.role === 'worker') return forbidden('Worker sessions cannot abort other sessions. Ask the manager session.');
+    return queueCommand(peer, request.target, { id: randomUUID(), type: 'abort', createdAt: Date.now() });
+  }
   if (request.type === 'session_compact') return queueCommand(peer, request.target, { id: randomUUID(), type: 'compact', createdAt: Date.now() });
   if (request.type === 'session_tree') return queueCommand(peer, request.target, { id: randomUUID(), type: 'tree', createdAt: Date.now() });
   if (request.type === 'session_navigate') return queueCommand(peer, request.target, { id: randomUUID(), type: 'navigate', targetEntryId: request.targetEntryId, createdAt: Date.now() });
@@ -302,8 +312,13 @@ async function failure(status: 'not_found' | 'ambiguous', error: string, data: R
   return { ok: false, status, error };
 }
 
+async function forbidden(error: string): Promise<GrapevineResponse> {
+  await audit('forbidden', { error });
+  return { ok: false, status: 'forbidden', error };
+}
+
 function touchPeer(peer: PeerInput): Peer {
-  const seen = { ...peer, lastSeen: Date.now() };
+  const seen = { ...peer, role: peer.role ?? 'manager', lastSeen: Date.now() };
   state.peers.set(peer.id, seen);
   return seen;
 }

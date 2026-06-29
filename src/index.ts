@@ -82,7 +82,7 @@ export default function grapevine(pi: ExtensionAPI) {
     async execute(_id, params: { name: string; cwd?: string; window?: string; group?: string }, _signal, _onUpdate, ctx) {
       const extensionPath = fileURLToPath(import.meta.url);
       const workerCwd = resolve(params.cwd ?? ctx.cwd);
-      const spawn = workerSpawnExec({ name: params.name, cwd: workerCwd, extensionPath, window: params.window, group: params.group });
+      const spawn = workerSpawnExec({ name: params.name, cwd: workerCwd, extensionPath, window: params.window, group: params.group, managerId: peerForContext(ctx).id });
       const execResult = await pi.exec(spawn.bin, spawn.args);
       const location = spawn.location;
       return result(execResult.code === 0 ? `Spawned ${params.name} in ${location}.` : execResult.stderr || execResult.stdout, { execResult });
@@ -383,6 +383,7 @@ function treeSnapshot(ctx: ExtensionContext) {
 function peerForContext(ctx: ExtensionContext): PeerInput {
   return currentPeer({
     name: process.env.PI_GRAPEVINE_NAME || ctx.sessionManager.getSessionName?.() || ctx.cwd.split('/').at(-1) || 'pi',
+    managerId: process.env.PI_GRAPEVINE_MANAGER_ID,
     sessionId: ctx.sessionManager.getSessionId(),
     sessionFile: ctx.sessionManager.getSessionFile?.(),
   });
@@ -398,7 +399,7 @@ function errorText(response: unknown) {
 }
 
 function formatStatus(peer: Peer, inbox: GrapevineMessage[]) {
-  return ['pi-grapevine broker is running.', `You: ${peer.name} (${peer.id})`, `Session: ${peer.sessionId ?? 'none'}`, `Unread: ${inbox.length}`, ...inbox.map((message) => `- ${message.from}: ${message.body}`)].join('\n');
+  return ['pi-grapevine broker is running.', `You: ${peer.name} (${peer.id}) role=${peer.role}`, `Session: ${peer.sessionId ?? 'none'}`, `Unread: ${inbox.length}`, ...inbox.map((message) => `- ${message.from}: ${message.body}`)].join('\n');
 }
 
 function formatPeers(peers: Peer[]) {
@@ -408,13 +409,14 @@ function formatPeers(peers: Peer[]) {
 
 function formatSessions(sessions: Peer[]) {
   if (sessions.length === 0) return 'No steerable sessions.';
-  return sessions.map((peer) => `${peer.name} (${peer.id}) session=${peer.sessionId} cwd=${peer.cwd}`).join('\n');
+  return sessions.map((peer) => `${peer.name} (${peer.id}) role=${peer.role} manager=${peer.managerId ?? 'none'} session=${peer.sessionId} cwd=${peer.cwd}`).join('\n');
 }
 
 function formatSessionStatuses(statuses: Array<{ peer: Peer; busy: boolean; currentTool?: string; lastAnswer?: string; pendingCommands: number; lastEventId: number }>) {
   if (statuses.length === 0) return 'No steerable sessions.';
   return statuses.map((status) => [
-    `${status.peer.name} (${status.peer.id}) ${status.busy ? 'busy' : 'idle'}`,
+    `${status.peer.name} (${status.peer.id}) ${status.busy ? 'busy' : 'idle'} role=${status.peer.role}`,
+    `  manager=${status.peer.managerId ?? 'none'}`,
     `  session=${status.peer.sessionId}`,
     `  cwd=${status.peer.cwd}`,
     `  pending=${status.pendingCommands} lastEvent=${status.lastEventId}`,

@@ -104,6 +104,29 @@ test('dead sessions are pruned from telemetry', async () => {
   }
 });
 
+test('worker sessions cannot abort other sessions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-grapevine-'));
+  const paths = testPaths(dir);
+  const manager = { id: 'manager-abort', name: 'manager', cwd: '/tmp/manager', pid: process.pid, role: 'manager' as const };
+  const worker = { id: 'worker-abort', name: 'worker', cwd: '/tmp/worker', pid: process.pid, role: 'worker' as const, sessionId: 'pi-session-worker' };
+  const target = { id: 'target-abort', name: 'target', cwd: '/tmp/target', pid: process.pid, sessionId: 'pi-session-target' };
+
+  try {
+    await requestBroker({ type: 'session_register', peer: worker }, paths);
+    await requestBroker({ type: 'session_register', peer: target }, paths);
+
+    const denied = await requestBroker({ type: 'session_abort', peer: worker, target: 'target' }, paths);
+    assert.equal(denied.ok, false);
+    assert.equal('status' in denied && denied.status, 'forbidden');
+
+    const allowed = await requestBroker({ type: 'session_abort', peer: manager, target: 'target' }, paths);
+    assert.equal(allowed.ok, true);
+    assert.equal('command' in allowed && allowed.command.type, 'abort');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('sessions unregister on shutdown', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pi-grapevine-'));
   const paths = testPaths(dir);

@@ -17,3 +17,11 @@ test('worker spawn uses agency window grouping', () => {
   assert.deepEqual(spawn.args.slice(0, 4), ['spawn', '--window', 'typecast-reviews', '--cmd']);
   assert.equal(spawn.args.at(-1), '/tmp/work');
 });
+
+test('worker spawn marks role and manager', () => {
+  const spawn = workerSpawnExec({ name: 'lane-a', cwd: '/tmp/work', extensionPath: '/tmp/gv.js', managerId: 'manager-id' });
+
+  const command = spawn.args.at(-1) ?? '';
+  assert.match(command, /PI_GRAPEVINE_ROLE=worker/);
+  assert.match(command, /PI_GRAPEVINE_MANAGER_ID='manager-id'/);
+});

@@ -4,10 +4,12 @@ export type WorkerSpawnParams = {
   extensionPath: string;
   window?: string;
   group?: string;
+  managerId?: string;
 };
 
 export function workerSpawnExec(params: WorkerSpawnParams) {
-  const command = `PI_GRAPEVINE_NAME=${shellQuote(params.name)} PI_SKIP_VERSION_CHECK=1 pi -e ${shellQuote(params.extensionPath)} --no-session`;
+  const manager = params.managerId ? ` PI_GRAPEVINE_MANAGER_ID=${shellQuote(params.managerId)}` : '';
+  const command = `PI_GRAPEVINE_NAME=${shellQuote(params.name)} PI_GRAPEVINE_ROLE=worker${manager} PI_SKIP_VERSION_CHECK=1 pi -e ${shellQuote(params.extensionPath)} --no-session`;
   const windowName = params.window ?? params.group;
   if (windowName) {
     return { bin: 'agency', args: ['spawn', '--window', windowName, '--cmd', command, params.cwd], location: `${params.cwd} in ${windowName}` };

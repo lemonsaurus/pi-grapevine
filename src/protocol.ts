@@ -3,17 +3,21 @@ export const peerTtlMs = 10 * 60 * 1000;
 
 export type CommandState = 'queued' | 'accepted' | 'running' | 'done' | 'failed' | 'aborted';
 
+export type PeerRole = 'manager' | 'worker';
+
 export type Peer = {
   id: string;
   name: string;
   cwd: string;
   pid: number;
+  role: PeerRole;
+  managerId?: string;
   sessionId?: string;
   sessionFile?: string;
   lastSeen: number;
 };
 
-export type PeerInput = Omit<Peer, 'lastSeen'>;
+export type PeerInput = Omit<Peer, 'lastSeen' | 'role'> & { role?: PeerRole };
 
 export type GrapevineMessage = {
   id: string;
@@ -122,4 +126,4 @@ export type GrapevineResponse =
   | { ok: true; status: 'delivered'; message: Omit<GrapevineMessage, 'body'> }
   | { ok: true; status: 'recorded'; event: SessionEvent }
   | { ok: true; status: 'unregistered' }
-  | { ok: false; status: 'not_found' | 'ambiguous' | 'too_large'; error: string };
+  | { ok: false; status: 'not_found' | 'ambiguous' | 'too_large' | 'forbidden'; error: string };
