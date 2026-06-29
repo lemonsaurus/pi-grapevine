@@ -66,10 +66,15 @@ export type DaemonStatus = {
   socket: string;
   auditLog: string;
   stateFile: string;
+  stateBytes: number;
+  auditBytes: number;
+  auditRotations: number;
   peerCount: number;
   sessionCount: number;
   eventCount: number;
   commandCount: number;
+  prunedPeerCount: number;
+  failedRequestCount: number;
 };
 
 export type TaskDigest = {
@@ -88,6 +93,7 @@ export type GrapevineRequest =
   | { type: 'send'; peer: PeerInput; to: string; body: string; replyTo?: string }
   | { type: 'inbox'; peer: PeerInput }
   | { type: 'session_register'; peer: PeerInput }
+  | { type: 'session_unregister'; peer: PeerInput }
   | { type: 'session_list'; peer: PeerInput }
   | { type: 'session_status'; peer: PeerInput; target?: string }
   | { type: 'session_prompt'; peer: PeerInput; target: string; text: string; deliverAs?: 'steer' | 'followUp' }
@@ -115,4 +121,5 @@ export type GrapevineResponse =
   | { ok: true; status: 'updated'; record: CommandRecord }
   | { ok: true; status: 'delivered'; message: Omit<GrapevineMessage, 'body'> }
   | { ok: true; status: 'recorded'; event: SessionEvent }
+  | { ok: true; status: 'unregistered' }
   | { ok: false; status: 'not_found' | 'ambiguous' | 'too_large'; error: string };

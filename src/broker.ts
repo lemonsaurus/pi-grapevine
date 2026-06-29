@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { appendFile, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -12,12 +12,29 @@ import { maxBodyBytes, peerTtlMs, type CommandRecord, type ControlCommand, type 
 let server: Server | undefined;
 let persistChain = Promise.resolve();
 
+const retainedEvents = 500;
+const maxEventTextBytes = 16 * 1024;
+const maxAuditBytes = 1024 * 1024;
+const transientEventTypes = new Set(['message_update', 'tool_execution_update']);
+
+let auditRotations = 0;
+let failedRequestCount = 0;
+let prunedPeerCount = 0;
+
+type SessionRuntimeState = {
+  busy: boolean;
+  currentTool?: string;
+  lastAnswer?: string;
+  lastEventId: number;
+};
+
 type State = {
   peers: Map<string, Peer>;
   inboxes: Map<string, GrapevineMessage[]>;
   commands: Map<string, ControlCommand[]>;
   commandRecords: Map<string, CommandRecord>;
   events: SessionEvent[];
+  sessionStates: Map<string, SessionRuntimeState>;
   nextEventId: number;
   paths: GrapevinePaths;
   idleTimer?: NodeJS.Timeout;
@@ -29,6 +46,7 @@ const state: State = {
   commands: new Map(),
   commandRecords: new Map(),
   events: [],
+  sessionStates: new Map(),
   nextEventId: 1,
   paths: grapevinePaths(),
 };
@@ -99,6 +117,8 @@ async function handleLine(socket: Socket, line: string) {
   try {
     socket.end(`${JSON.stringify(await handleRequest(JSON.parse(line) as GrapevineRequest))}\n`);
   } catch (error) {
+    failedRequestCount += 1;
+    await audit('request_failed', { error: String(error) }).catch(() => undefined);
     socket.end(`${JSON.stringify({ ok: false, status: 'not_found', error: String(error) })}\n`);
   }
 }
@@ -114,6 +134,7 @@ async function handleRequest(request: GrapevineRequest): Promise<GrapevineRespon
   if (request.type === 'list') return { ok: true, peers: [...state.peers.values()] };
   if (request.type === 'inbox') return takeInbox(peer);
   if (request.type === 'session_register') return registerSession(peer);
+  if (request.type === 'session_unregister') return unregisterSession(peer);
   if (request.type === 'session_list') return { ok: true, sessions: sessions() };
   if (request.type === 'session_status') return sessionStatus(request.target);
   if (request.type === 'session_prompt') return queueCommand(peer, request.target, { id: randomUUID(), type: 'prompt', text: request.text, deliverAs: request.deliverAs, createdAt: Date.now() });
@@ -138,10 +159,15 @@ function daemonStatus(): GrapevineResponse {
       socket: state.paths.socket,
       auditLog: state.paths.auditLog,
       stateFile: state.paths.state,
+      stateBytes: fileSize(state.paths.state),
+      auditBytes: fileSize(state.paths.auditLog),
+      auditRotations,
       peerCount: state.peers.size,
       sessionCount: sessions().length,
       eventCount: state.events.length,
       commandCount: state.commandRecords.size,
+      prunedPeerCount,
+      failedRequestCount,
     },
   };
 }
@@ -164,6 +190,15 @@ async function registerSession(peer: Peer): Promise<GrapevineResponse> {
   return { ok: true, peer };
 }
 
+async function unregisterSession(peer: Peer): Promise<GrapevineResponse> {
+  state.peers.delete(peer.id);
+  state.commands.delete(peer.id);
+  state.sessionStates.delete(peer.id);
+  await audit('session_unregister', { peer: peer.id, name: peer.name, sessionId: peer.sessionId });
+  await persist();
+  return { ok: true, status: 'unregistered' };
+}
+
 function sessions(): Peer[] {
   return [...state.peers.values()].filter((peer) => peer.sessionId);
 }
@@ -179,16 +214,14 @@ function sessionStatus(target?: string): GrapevineResponse {
 }
 
 function statusForPeer(peer: Peer): SessionStatus {
-  const events = state.events.filter((event) => event.sessionId === peer.id);
-  const currentTool = [...events].reverse().find((event) => event.type === 'tool_execution_start' || event.type === 'tool_execution_end');
-  const lastAnswer = [...events].reverse().map((event) => assistantText(event.data)).find(Boolean);
+  const runtime = state.sessionStates.get(peer.id);
   const commands = [...state.commandRecords.values()].filter((record) => record.sessionId === peer.id).slice(-20);
   return {
     peer,
-    busy: lastLifecycle(events) === 'agent_start',
-    currentTool: currentTool?.type === 'tool_execution_start' ? readToolName(currentTool.data) : undefined,
-    lastAnswer,
-    lastEventId: events.at(-1)?.id ?? 0,
+    busy: runtime?.busy ?? false,
+    currentTool: runtime?.currentTool,
+    lastAnswer: runtime?.lastAnswer,
+    lastEventId: runtime?.lastEventId ?? 0,
     pendingCommands: state.commands.get(peer.id)?.length ?? 0,
     commands,
   };
@@ -207,6 +240,7 @@ async function queueCommand(from: Peer, target: string, command: ControlCommand)
 
 async function takeCommands(peer: Peer): Promise<GrapevineResponse> {
   const commands = state.commands.get(peer.id) ?? [];
+  if (commands.length === 0) return { ok: true, commands };
   state.commands.set(peer.id, []);
   for (const command of commands) setCommand(command.id, 'accepted');
   await persist();
@@ -228,9 +262,12 @@ function setCommand(commandId: string, commandState: CommandRecord['state'], err
 }
 
 async function recordEvent(peer: Peer, type: string, data: unknown): Promise<GrapevineResponse> {
-  const event = { id: state.nextEventId++, sessionId: peer.id, type, at: Date.now(), data };
+  const event = { id: state.nextEventId, sessionId: peer.id, type, at: Date.now(), data: compactEventData(type, data) };
+  updateSessionState(event);
+  if (transientEventTypes.has(type)) return { ok: true, status: 'recorded', event };
+  state.nextEventId += 1;
   state.events.push(event);
-  state.events = state.events.slice(-2000);
+  state.events = state.events.slice(-retainedEvents);
   await audit('event', { peer: peer.id, type });
   await persist();
   return { ok: true, status: 'recorded', event };
@@ -285,16 +322,43 @@ function findSession(target: string, senderId?: string): { ok: true; peer: Peer 
 function prunePeers() {
   const cutoff = Date.now() - peerTtlMs;
   for (const [id, peer] of state.peers) {
-    if (peer.lastSeen < cutoff) {
+    if (peer.lastSeen < cutoff || !isPidAlive(peer.pid)) {
       state.peers.delete(id);
       state.commands.delete(id);
+      state.sessionStates.delete(id);
+      prunedPeerCount += 1;
     }
   }
 }
 
 async function audit(event: string, data: Record<string, unknown>) {
+  await rotateAuditIfNeeded();
   await appendFile(state.paths.auditLog, `${JSON.stringify({ event, at: Date.now(), ...data })}\n`, { mode: 0o600 });
   await chmod(state.paths.auditLog, 0o600);
+}
+
+async function rotateAuditIfNeeded() {
+  if (fileSize(state.paths.auditLog) < maxAuditBytes) return;
+  await rm(`${state.paths.auditLog}.1`, { force: true });
+  await rename(state.paths.auditLog, `${state.paths.auditLog}.1`).catch(() => undefined);
+  auditRotations += 1;
+}
+
+function fileSize(path: string): number {
+  try {
+    return existsSync(path) ? statSync(path).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isPidAlive(targetPid: number): boolean {
+  try {
+    process.kill(targetPid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function loadState() {
@@ -306,14 +370,20 @@ async function loadState() {
       commands?: Array<[string, ControlCommand[]]>;
       commandRecords?: CommandRecord[];
       events?: SessionEvent[];
+      sessionStates?: Array<[string, SessionRuntimeState]>;
       nextEventId?: number;
     };
     state.peers = new Map(saved.peers?.map((peer) => [peer.id, peer]));
     state.inboxes = new Map(saved.inboxes ?? []);
     state.commands = new Map(saved.commands ?? []);
     state.commandRecords = new Map(saved.commandRecords?.map((record) => [record.id, record]));
-    state.events = saved.events ?? [];
-    state.nextEventId = saved.nextEventId ?? Math.max(0, ...state.events.map((event) => event.id)) + 1;
+    state.events = (saved.events ?? [])
+      .filter((event) => !transientEventTypes.has(event.type))
+      .map((event) => ({ ...event, data: compactEventData(event.type, event.data) }))
+      .slice(-retainedEvents);
+    state.sessionStates = new Map(saved.sessionStates ?? []);
+    for (const event of state.events) updateSessionState(event);
+    state.nextEventId = Math.max(saved.nextEventId ?? 1, Math.max(0, ...state.events.map((event) => event.id)) + 1);
   } catch {}
 }
 
@@ -323,6 +393,7 @@ function resetState() {
   state.commands = new Map();
   state.commandRecords = new Map();
   state.events = [];
+  state.sessionStates = new Map();
   state.nextEventId = 1;
 }
 
@@ -333,7 +404,8 @@ async function persist() {
     inboxes: [...state.inboxes.entries()],
     commands: [...state.commands.entries()],
     commandRecords: [...state.commandRecords.values()].slice(-500),
-    events: state.events.slice(-2000),
+    events: state.events.slice(-retainedEvents),
+    sessionStates: [...state.sessionStates.entries()],
     nextEventId: state.nextEventId,
   });
   persistChain = persistChain
@@ -348,8 +420,50 @@ async function persist() {
   await persistChain;
 }
 
-function lastLifecycle(events: SessionEvent[]): string | undefined {
-  return [...events].reverse().find((event) => event.type === 'agent_start' || event.type === 'agent_end')?.type;
+function updateSessionState(event: SessionEvent) {
+  const current = state.sessionStates.get(event.sessionId) ?? { busy: false, lastEventId: 0 };
+  const next = { ...current, lastEventId: event.id };
+  if (event.type === 'agent_start') next.busy = true;
+  if (event.type === 'agent_end') {
+    next.busy = false;
+    next.currentTool = undefined;
+  }
+  if (event.type === 'tool_execution_start') next.currentTool = readToolName(event.data);
+  if (event.type === 'tool_execution_end') next.currentTool = undefined;
+  const answer = assistantText(event.data);
+  if (answer) next.lastAnswer = answer;
+  state.sessionStates.set(event.sessionId, next);
+}
+
+function compactEventData(type: string, data: unknown): unknown {
+  if (type === 'message_end') return compactMessage(data);
+  if (type.startsWith('tool_execution_')) return pickObject(data, ['toolName', 'toolCallId', 'state', 'code']);
+  return compactJson(data);
+}
+
+function compactMessage(data: unknown): unknown {
+  const record = typeof data === 'object' && data ? data as { role?: unknown; content?: unknown } : {};
+  return { role: record.role, content: truncate(textContent(record), maxEventTextBytes) };
+}
+
+function compactJson(data: unknown): unknown {
+  const json = JSON.stringify(data);
+  return Buffer.byteLength(json, 'utf8') <= maxEventTextBytes ? data : { summary: truncate(json, maxEventTextBytes) };
+}
+
+function pickObject(data: unknown, keys: string[]): Record<string, unknown> {
+  const record = typeof data === 'object' && data ? data as Record<string, unknown> : {};
+  return Object.fromEntries(keys.flatMap((key) => key in record ? [[key, record[key]]] : []));
+}
+
+function textContent(data: { content?: unknown }): string {
+  if (typeof data.content === 'string') return data.content;
+  if (!Array.isArray(data.content)) return '';
+  return data.content.map((part) => typeof part === 'object' && part && 'text' in part ? String((part as { text?: unknown }).text) : '').join('');
+}
+
+function truncate(value: string, bytes: number): string {
+  return Buffer.byteLength(value, 'utf8') <= bytes ? value : `${value.slice(0, bytes)}…`;
 }
 
 function readToolName(data: unknown): string | undefined {

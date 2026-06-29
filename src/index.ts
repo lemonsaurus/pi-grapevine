@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentPeer, requestBroker } from './broker.js';
 import type { ControlCommand, GrapevineMessage, Peer, PeerInput, SessionEvent, TaskDigest } from './protocol.js';
+import { workerSpawnExec } from './spawn.js';
 
 const pollTimers = new Map<string, NodeJS.Timeout>();
 const activeCommands = new Map<string, string>();
@@ -77,13 +78,14 @@ export default function grapevine(pi: ExtensionAPI) {
     name: 'grapevine_spawn',
     label: 'Grapevine Spawn',
     description: 'Spawn a named Pi worker in tmux with pi-grapevine loaded.',
-    parameters: Type.Object({ name: Type.String(), cwd: Type.Optional(Type.String()) }),
-    async execute(_id, params: { name: string; cwd?: string }, _signal, _onUpdate, ctx) {
+    parameters: Type.Object({ name: Type.String(), cwd: Type.Optional(Type.String()), window: Type.Optional(Type.String()), group: Type.Optional(Type.String()) }),
+    async execute(_id, params: { name: string; cwd?: string; window?: string; group?: string }, _signal, _onUpdate, ctx) {
       const extensionPath = fileURLToPath(import.meta.url);
-      const workerCwd = params.cwd ?? ctx.cwd;
-      const command = `PI_GRAPEVINE_NAME=${shellQuote(params.name)} PI_SKIP_VERSION_CHECK=1 pi -e ${shellQuote(extensionPath)} --no-session`;
-      const execResult = await pi.exec('tmux', ['new-window', '-d', '-c', workerCwd, '-n', `gv-${params.name}`, command]);
-      return result(execResult.code === 0 ? `Spawned ${params.name} in ${workerCwd}.` : execResult.stderr || execResult.stdout, { execResult });
+      const workerCwd = resolve(params.cwd ?? ctx.cwd);
+      const spawn = workerSpawnExec({ name: params.name, cwd: workerCwd, extensionPath, window: params.window, group: params.group });
+      const execResult = await pi.exec(spawn.bin, spawn.args);
+      const location = spawn.location;
+      return result(execResult.code === 0 ? `Spawned ${params.name} in ${location}.` : execResult.stderr || execResult.stdout, { execResult });
     },
   });
 
@@ -228,7 +230,7 @@ function activateSession(pi: ExtensionAPI, ctx: ExtensionContext) {
   const peer = peerForContext(ctx);
   if (pollTimers.has(peer.id)) return;
   void safeGrapevine(ctx, () => requestBroker({ type: 'session_register', peer }));
-  const timer = setInterval(() => void safeGrapevine(ctx, () => pollCommands(pi, ctx)), 500);
+  const timer = setInterval(() => void safeGrapevine(ctx, () => pollCommands(pi, ctx)), 2000);
   timer.unref?.();
   pollTimers.set(peer.id, timer);
   setGrapevineStatus(ctx, 'ok');
@@ -238,6 +240,7 @@ function deactivateSession(ctx: ExtensionContext) {
   const peer = peerForContext(ctx);
   clearInterval(pollTimers.get(peer.id));
   pollTimers.delete(peer.id);
+  void safeGrapevine(ctx, () => requestBroker({ type: 'session_unregister', peer }));
   ctx.ui.setStatus('grapevine', undefined);
 }
 
@@ -322,10 +325,12 @@ async function runSessionMethod(ctx: ExtensionContext, commandId: string, method
 }
 
 async function updateCommand(ctx: ExtensionContext, commandId: string, state: 'accepted' | 'running' | 'done' | 'failed' | 'aborted', error?: string) {
+  if (process.env.PI_GRAPEVINE_DISABLE === '1') return;
   await requestBroker({ type: 'session_command_update', peer: peerForContext(ctx), commandId, state, error }).catch(() => undefined);
 }
 
 async function postSessionEvent(ctx: ExtensionContext, eventType: string, data: unknown) {
+  if (process.env.PI_GRAPEVINE_DISABLE === '1') return;
   const peer = peerForContext(ctx);
   if (!peer.sessionId) return;
   await requestBroker({ type: 'session_event', peer, eventType, data }).catch(() => undefined);
@@ -450,6 +455,3 @@ function toolName(data: unknown): string | undefined {
   return typeof data === 'object' && data && 'toolName' in data ? String((data as { toolName?: unknown }).toolName) : undefined;
 }
 
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
