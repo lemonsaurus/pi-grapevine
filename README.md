@@ -1,5 +1,11 @@
 # pi-grapevine
 
+# FAILED EXPERIMENT: DO NOT USE
+
+This was a failed experiment that did not work. The repo is archived for reference only.
+
+Do not install it, copy it into Pi, or wire agents to it.
+
 Paranoid local messaging for Pi agents.
 
 For now this is a local-only Pi session control plane over a Unix socket.
